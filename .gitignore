@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Datasets
+data/
+dataset/
+datasets/
+*.tar
+*.tar.gz
+*.npy
+*.npz
+*.ply
+*.pcd
+*.las
+*.laz
+
+# Model weights and checkpoints
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Generated experiment outputs
+experiments/logs/
+experiments/predictions/
+outputs/
+runs/
+wandb/
+
+# Temporary and OS files
+*.log
+.DS_Store
+Thumbs.db

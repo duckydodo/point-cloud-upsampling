@@ -1,0 +1,22 @@
+# Install PyTorch FIRST (see README, step 2), then:  pip install -r requirements.txt
+numpy==1.26.4
+scipy
+spconv-cu124
+addict
+yapf
+einops
+timm
+termcolor
+tensorboard
+tensorboardX
+wandb
+plyfile
+h5py
+pyyaml
+tqdm
+pillow
+torch-geometric
+pandas
+matplotlib
+tabulate
+ipykernel

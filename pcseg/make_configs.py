@@ -39,6 +39,8 @@ def make_config(name, train_root, test_root, *, pointcept_dir=None, batch_size=4
     cfg.enable_amp = bool(amp)
     cfg.enable_wandb = False
     cfg.seed = seed
+    if "hooks" in cfg:
+        cfg.hooks = [h for h in cfg.hooks if h.get("type") not in ("PreciseEvaluator", "SemSegEvaluator")]
     lr = base_lr * batch_size / base_bs
     cfg.optimizer.lr = lr
     cfg.scheduler.max_lr = [lr, lr / 10]

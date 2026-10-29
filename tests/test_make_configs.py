@@ -20,8 +20,9 @@ def test_make_config_hook_filtering():
 class ConfigDict(dict):
     def __getattr__(self, name):
         v = self[name]
-        if isinstance(v, dict):
-            return ConfigDict(v)
+        if isinstance(v, dict) and not isinstance(v, ConfigDict):
+            v = ConfigDict(v)
+            self[name] = v
         return v
     def __setattr__(self, name, value):
         self[name] = value
@@ -106,9 +107,14 @@ cfg = dict(
         assert "CheckpointLoader" in hook_types, f"CheckpointLoader missing: {hook_types}"
         assert "InformationWriter" in hook_types, f"InformationWriter missing: {hook_types}"
         assert generated["evaluate"] is False, "evaluate flag should be False"
+        test_crop = generated["data"]["test"]["test_cfg"]["crop"]
+        assert test_crop["type"] == "SphereCrop", f"Unexpected crop type: {test_crop}"
+        assert test_crop["mode"] == "all", f"Unexpected crop mode: {test_crop}"
+        assert test_crop["point_max"] == 100000, f"Unexpected point_max: {test_crop}"
 
-        print("TEST PASSED: make_config hook filtering verified.")
+        print("TEST PASSED: make_config hook filtering and evaluation crop verified.")
         print("Generated hooks:", hook_types)
+        print("Generated test crop:", test_crop)
 
 
 if __name__ == "__main__":

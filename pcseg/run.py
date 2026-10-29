@@ -119,8 +119,9 @@ def test_cmd(name, tag, config_path, weight, test_root, split="Area_5", options=
 
 def test(name, tag, test_root, weight=None, config_path=None, split="Area_5", options=None, dry_run=False):
     """Run tools/test.py on test_root/<split>; returns the folder with <Area>-<room>_pred.npy files."""
-    save = settings.EXP / name
-    config_path = config_path or save / "config.py"
+    if config_path is None:
+        cand = settings.POINTCEPT / "configs" / "s3dis" / f"pcseg_{name}.py"
+        config_path = cand if cand.exists() else save / "config.py"
     weight = weight or save / "model" / "model_last.pth"
     cmd, res = test_cmd(name, tag, config_path, weight, test_root, split, options)
     print("$", " ".join(cmd))

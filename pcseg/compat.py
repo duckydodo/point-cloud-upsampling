@@ -139,11 +139,105 @@ def install_shims(stub_dir=None, python=None):
     return stubbed
 
 
+SPHERE_CROP_ALL = '''
+
+# ---- pcseg patch: SphereCrop mode="all" for evaluation fragmentation ----
+@TRANSFORMS.register_module(name="SphereCrop", force=True)
+class SphereCrop(object):
+    """Evaluation fragmentation crop: guarantees 100% point coverage in sphere crops <= point_max."""
+
+    def __init__(self, point_max=80000, sample_rate=None, mode="random"):
+        self.point_max = point_max
+        self.sample_rate = sample_rate
+        assert mode in ["random", "center", "all", "given"]
+        self.mode = mode
+
+    def __call__(self, data_dict):
+        point_max = (
+            int(self.sample_rate * data_dict["coord"].shape[0])
+            if self.sample_rate is not None
+            else self.point_max
+        )
+
+        assert "coord" in data_dict.keys()
+        if self.mode == "all":
+            if "index" not in data_dict:
+                data_dict["index"] = np.arange(data_dict["coord"].shape[0])
+            if data_dict["coord"].shape[0] <= point_max:
+                return [data_dict]
+
+            coord = data_dict["coord"]
+            n = coord.shape[0]
+            uncovered = np.ones(n, dtype=bool)
+            coord_p = np.zeros(n, dtype=np.float32)
+            data_part_list = []
+
+            if "index_valid_keys" in data_dict and "index" not in data_dict["index_valid_keys"]:
+                data_dict["index_valid_keys"] = list(data_dict["index_valid_keys"]) + ["index"]
+
+            while uncovered.any():
+                uncovered_idx = np.where(uncovered)[0]
+                init_idx = uncovered_idx[np.argmin(coord_p[uncovered_idx])]
+                dist2 = np.sum(np.square(coord - coord[init_idx]), axis=1)
+                idx_crop = np.argsort(dist2)[:point_max]
+
+                uncovered[idx_crop] = False
+                max_dist2 = dist2[idx_crop].max()
+                if max_dist2 > 0:
+                    delta = np.square(1.0 - dist2[idx_crop] / max_dist2)
+                    coord_p[idx_crop] += delta
+
+                data_crop_dict = index_operator(data_dict, idx_crop, duplicate=True)
+                data_crop_dict["index"] = data_dict["index"][idx_crop]
+                data_part_list.append(data_crop_dict)
+
+            return data_part_list
+
+        elif data_dict["coord"].shape[0] > point_max:
+            if self.mode == "random":
+                center = data_dict["coord"][
+                    np.random.randint(data_dict["coord"].shape[0])
+                ]
+            elif self.mode == "center":
+                center = data_dict["coord"][data_dict["coord"].shape[0] // 2]
+            elif self.mode == "given":
+                given_index = data_dict["correspondence"].reshape(
+                    data_dict["correspondence"].shape[0], -1
+                )
+                given_index = np.all(
+                    given_index != np.ones_like(given_index[0]) * -1, axis=1
+                )
+                given_coord = data_dict["coord"][given_index]
+                if given_coord.shape[0] == 0:
+                    center = data_dict["coord"][
+                        np.random.randint(data_dict["coord"].shape[0])
+                    ]
+                else:
+                    center = np.mean(given_coord, axis=0)
+            else:
+                raise NotImplementedError
+            idx_crop = np.argsort(np.sum(np.square(data_dict["coord"] - center), 1))[
+                :point_max
+            ]
+            data_dict = index_operator(data_dict, idx_crop)
+        return data_dict
+'''
+
+
 def patch_pointcept(pointcept_dir=None):
-    """Idempotently append RandomSparsify to Pointcept's transform module."""
+    """Idempotently append RandomSparsify and SphereCrop (mode='all') to Pointcept's transform module."""
     f = Path(pointcept_dir or settings.POINTCEPT) / "pointcept" / "datasets" / "transform.py"
+    if not f.exists():
+        return False
     text = f.read_text()
+    patched = False
     if "class RandomSparsify" not in text:
-        f.write_text(text + RANDOM_SPARSIFY)
-        return True
-    return False
+        text += RANDOM_SPARSIFY
+        patched = True
+    if 'name="SphereCrop", force=True' not in text:
+        text += SPHERE_CROP_ALL
+        patched = True
+    if patched:
+        f.write_text(text)
+    return patched
+

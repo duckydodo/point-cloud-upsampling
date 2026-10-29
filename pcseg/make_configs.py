@@ -63,12 +63,16 @@ def make_config(name, train_root, test_root, *, pointcept_dir=None, batch_size=4
         d.test.test_cfg.aug_transform = [[dict(type="RandomScale", scale=[1, 1])]]
     elif tta != "full":
         raise ValueError("tta must be 'single' or 'full'")
+    d.test.test_cfg.crop = dict(type="SphereCrop", point_max=point_max, mode="all")
     cfg.save_path = str(settings.EXP / name)
 
     out_dir = Path(out_dir or pointcept_dir / "configs" / "s3dis")
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"pcseg_{name}.py"
     cfg.dump(str(path))
+    exp_cfg = settings.EXP / name / "config.py"
+    if exp_cfg.exists():
+        cfg.dump(str(exp_cfg))
     return str(path)
 
 

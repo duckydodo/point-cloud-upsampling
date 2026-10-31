@@ -2,7 +2,7 @@
 
 **Project:** Learning-Based Point-Cloud Upsampling for Improved Semantic Segmentation of Sparse 3D Point Clouds  
 **Last Updated:** October 2026  
-**Hardware Platforms:**  
+**Hardware Platforms (reported in project notes; not independently verified from the current checkout):**
 - **Host / Local Audit Machine:** Fedora Linux x86_64, Python 3.14 (Code audit, syntax validation, self-contained unit/regression tests).
 - **Lab GPU Machine:** NVIDIA RTX 2000 Ada (16 GB VRAM, Ada Lovelace sm_89), Python 3.10, PyTorch 2.5.0 + CUDA 12.4, SpConv-cu124.
 - **Historical Google Colab Environment:** Tesla T4 (15.7 GB VRAM, Turing sm_75), CUDA 12.4 (historical run records, benchmark trace).
@@ -11,11 +11,13 @@
 
 ## 1. Executive Summary of Experiment Status
 
+This status report distinguishes statements recorded in historical notes from artifacts available in the current checkout. The notebooks have no saved outputs, the current `workspace/` contains an ignored Pointcept source checkout but no project checkpoints or result summaries, and the two downloaded logs inspected on 2026-10-31 stop during resume at epoch 5. Consequently, completed training and the reported throughput are **not established by the available artifacts**. Treat those historical statements as unverified until logs and checkpoint metadata are recovered.
+
 | Experiment Row / Stage | Objective | Target Data (Train -> Test) | Status | Checkpoints Available? | Evaluation Metrics Verified? | Provenance Notes |
 |---|---|---|---|---|---|---|
-| **PTv3 Benchmark (`bench`)** | Iteration speed & VRAM profiling | `s3dis` -> None (train only, 102 iters) | **Completed** | Yes (`model_last.pth`) | N/A (speed: ~0.45s/it on T4) | Completed on Colab; post-training hook crash identified and resolved via hook filter in `pcseg/make_configs.py`. |
-| **Phase 0 Gate: Dense (`P0_dense`)** | Short schedule (20 epochs) sanity check on dense data | `s3dis` -> `Area_5` dense | **Trained; Eval Pending** | Yes (Saved on Lab Machine: `model_last.pth`) | Pending Area 5 Eval | Training completed (20/20 epochs). Initial Area 5 evaluation crashed with CUDA OOM inside PTv3 attention. Evaluation fragmentation patch prepared. |
-| **Phase 0 Gate: Sparse (`P0_sparse25`)** | Short schedule (20 epochs) sanity check on 25% sparse data | `s3dis_sparse25` -> `Area_5` sparse | **Trained; Eval Pending** | Yes (Saved on Lab Machine: `model_last.pth`) | Pending Area 5 Eval | Training completed (20/20 epochs). Initial Area 5 evaluation crashed with CUDA OOM inside PTv3 attention. Evaluation fragmentation patch prepared. |
+| **PTv3 Benchmark (`bench`)** | Iteration speed & VRAM profiling | `s3dis` -> None (train only, 102 iters) | **Unverified from current artifacts** | Not present | No accuracy metrics applicable | Historical notes report a Colab run and ~0.45 s/iteration, but its log/checkpoint is not available in this checkout. |
+| **Phase 0 Gate: Dense (`P0_dense`)** | Short schedule (20 epochs) sanity check on dense data | `s3dis` -> `Area_5` dense | **Unverified; evaluation not evidenced** | Not present | No | Downloaded log stops during resume at epoch 5; it does not prove a completed run. |
+| **Phase 0 Gate: Sparse (`P0_sparse25`)** | Short schedule (20 epochs) sanity check on 25% sparse data | `s3dis_sparse25` -> `Area_5` sparse | **Unverified; evaluation not evidenced** | Not present | No | Downloaded log stops during resume at epoch 5; it does not prove a completed run. |
 | **Row A (`A_dense`)** | Upper baseline: trained on dense S3DIS | `s3dis` -> `Area_5` dense | **Planned / Ready** | No | No | Config generation and pipeline code verified; full training (100 epochs) pending Phase 0 gate decision. |
 | **Row B (`B_sparse25`)** | Direct sparse baseline: trained on 25% sparse data | `s3dis_sparse25` -> `Area_5` sparse25 | **Planned / Ready** | No | No | Pipeline code verified; awaiting execution. |
 | **Row C (`A_dense_on_sparse25`)** | Degradation test: dense-trained model tested on sparse data | `s3dis` -> `Area_5` sparse25 | **Planned / Ready** | Reuses Row A checkpoint | No | Test-only row using `A_dense` weights. |
@@ -32,22 +34,19 @@
 
 ## 2. Hardware and Environment Audit
 
-### A. Lab GPU Machine (NVIDIA RTX 2000 Ada)
+### A. Lab GPU Machine (reported, current artifacts unavailable)
 - **GPU Architecture:** Ada Lovelace (Compute Capability 8.9), 16 GB GDDR6 VRAM with ECC.
 - **Driver & CUDA:** Driver R550+, CUDA 12.4.
 - **Python / PyTorch Stack:** Python 3.10, PyTorch 2.5.0 (`cu124`), `spconv-cu124` 2.3.6.
-- **Verified Execution on Lab Machine:**
-  - `P0_dense` completed training (20 epochs). Checkpoint `model_last.pth` successfully written to `workspace/exp/P0_dense/model/`.
-  - `P0_sparse25` completed training (20 epochs). Checkpoint `model_last.pth` successfully written to `workspace/exp/P0_sparse25/model/`.
-  - Area 5 evaluation encountered CUDA OOM inside PTv3 attention during full-room testing.
+- **Evidence available now:** The checkpoint files are absent from the current checkout. Downloaded logs dated October 28 show each run loading a checkpoint and resuming at epoch 5; they do not contain subsequent epoch completion or Area 5 evaluation results.
 
-### B. Fedora Local Host
+### B. Fedora Local Host (historically reported)
 - **Environment:** Fedora Linux x86_64, Python 3.14.8.
 - **Role:** Code inspection, AST validation, static analysis, unit test development.
-- **Verified Local Tests:**
-  - `tests/test_make_configs.py`: PASSED (Exit code 0).
-  - `tests/test_pred_shape.py`: PASSED (Exit code 0).
-  - `tests/test_sphere_crop.py`: PASSED (Exit code 0).
+- **Verified Local Regression Tests (executed 2026-10-31):**
+  - `tests/test_make_configs.py`: PASSED (Exit code 0, verifies hook filtering and SphereCrop(mode="all") config).
+  - `tests/test_pred_shape.py`: PASSED (Exit code 0, verifies 1D flattening to prevent outer-product broadcast).
+  - `tests/test_sphere_crop.py`: PASSED (Exit code 0, verifies 100% test coverage and partition bounds).
 
 ### C. Google Drive / Colab Historical Trace
 - **Inspection Finding:** An earlier Google Drive audit verified that `pcseg/results/` and `pcseg/upsampler/dev_x4/` were empty.

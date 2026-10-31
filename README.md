@@ -223,26 +223,21 @@ python -m pcseg.pu_infer \
 
 ---
 
-## 12. Results Section (Verified Experimental Findings)
+## 12. Results and Evidence Status
 
-### Phase 0 Gate & Hardware Verification (NVIDIA RTX 2000 Ada 16 GB)
-- **Iteration Speed:** ~0.45 s/iter (allowing ~2.3 hours per 100-epoch training run at batch size 4).
-- **Completed Checkpoints:**
-  - `workspace/exp/P0_dense/model/model_last.pth` (20 epochs completed).
-  - `workspace/exp/P0_sparse25/model/model_last.pth` (20 epochs completed).
-- **Engineering Fixes Verified:**
-  1. *Hook Filtering:* Disabling validation hooks (`PreciseEvaluator`, `SemSegEvaluator`) resolved benchmark post-training crash.
-  2. *Evaluation Fragmentation:* Implemented `SphereCrop(mode="all")` in `pcseg/compat.py` to prevent CUDA OOM during Area 5 evaluation.
-  3. *Broadcasting Protection:* Fixed 2D prediction array reshaping (`.reshape(-1)`) to avoid terabyte-scale memory allocation during error visualization.
+The repository contains experiment code and cleared notebooks, but no saved checkpoints, prediction files, evaluation summaries, or notebook execution outputs. The quantitative experiment matrix has therefore **not been verified from artifacts in this repository**. Do not interpret the architecture, schedules, hardware targets, or example commands above as evidence that the corresponding experiments completed.
 
-*(Full quantitative tables for Rows A–H will be populated following completion of the lab GPU evaluation runs.)*
+The downloaded training logs inspected for this repository end while resuming the `P0_dense` and `P0_sparse25` jobs at epoch 5. They do not establish completion of the proposed 20-epoch runs or provide an Area 5 evaluation. The previously reported throughput estimate and completed-checkpoint claims are not reproduced here as verified results.
+
+The codebase includes fixes for evaluator-hook handling, fragmented test-time crops, and prediction-shape broadcasting. These are implementation claims supported by source and focused regression tests; they do not establish that the full PTv3 experiment matrix or learned upsampling pipeline has completed.
 
 ---
 
 ## 13. Limitations and Current Status
 
 - **Point Transformer V3 Configuration:** PTv3 is configured for RGB-only inputs (`in_channels=3`, no surface normals) because upsampled points do not possess original scanner normals. Consequently, absolute mIoU values are lower than published benchmarks that rely on true surface normals.
-- **Pending Experiments:** Full Area 5 evaluation of Phase 0 models and training of the full baseline matrix (Rows A, B, D, H) are currently queued on the lab GPU.
+- **Experiment status:** PTv3 baselines, learned upsampler training, full-scene inference, and Area 5 quantitative evaluation remain unverified. See [`docs/EXPERIMENT_STATUS.md`](docs/EXPERIMENT_STATUS.md) for provenance and the current evidence boundary.
+- **Projected versus measured:** Values, runtime estimates, hardware assumptions, and expected outputs in plans or commands are targets or examples unless accompanied by saved logs/checkpoints and reproducible evaluation artifacts. No mIoU, OA, mAcc, or geometric metric result is claimed here.
 
 ---
 

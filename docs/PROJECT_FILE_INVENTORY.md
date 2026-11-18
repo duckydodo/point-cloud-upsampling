@@ -46,6 +46,21 @@ This inventory documents all source code, notebooks, configuration files, test s
 
 ---
 
+## 3b. Kaggle Batch Runners (`kaggle/`)
+
+| File | Purpose | Arguments | Expected Outputs | Git Status | Execution Status |
+|---|---|---|---|---|---|
+| `kaggle/README.md` | Runbook and upload guide for 3-stage chained Kaggle batch execution. | None | Documentation | Tracked | Maintained |
+| `kaggle/kaggle_utils.py` | Environment setup, ephemeral `/tmp` scratch resolution, GPU pinning, and TimeGuard monitor. | None | Runtime setup | Tracked | Verified |
+| `kaggle/stage1_data_and_upsampler.py` | Stage 1 runner: data setup, patch bank extraction, PUNet training, validation metrics. | `--smoke-test`, `--data-root`, `--output-dir`, `--max-hours` | Artifacts in `/kaggle/working/stage1_out/` | Tracked | Verified syntax & smoke-test logic |
+| `kaggle/stage1_data_and_upsampler.ipynb` | Stage 1 notebook for direct Kaggle upload ("Save & Run All"). | None | Cleared output notebook | Tracked | Verified clean syntax |
+| `kaggle/stage2_baselines_and_eval.py` | Stage 2 runner: PTv3 baselines (Rows A, B, D), Area 5 dense evaluation (Rows A, B, C, E, G). | `--smoke-test`, `--stage1-input`, `--data-root`, `--output-dir`, `--max-hours` | Artifacts in `/kaggle/working/stage2_out/` | Tracked | Verified syntax & smoke-test logic |
+| `kaggle/stage2_baselines_and_eval.ipynb` | Stage 2 notebook for direct Kaggle upload ("Save & Run All"). | None | Cleared output notebook | Tracked | Verified clean syntax |
+| `kaggle/stage3_crossfit_and_tables.py` | Stage 3 runner: cross-fit upsampling, Row H training, and final Markdown/LaTeX/CSV table export. | `--smoke-test`, `--stage1-input`, `--stage2-input`, `--output-dir`, `--max-hours` | Artifacts in `/kaggle/working/final_results/` | Tracked | Verified syntax & smoke-test logic |
+| `kaggle/stage3_crossfit_and_tables.ipynb` | Stage 3 notebook for direct Kaggle upload ("Save & Run All"). | None | Cleared output notebook | Tracked | Verified clean syntax |
+
+---
+
 ## 4. Test Suite (`tests/`)
 
 | File | Purpose | Dependencies | Target Component | Git Status | Execution Status |

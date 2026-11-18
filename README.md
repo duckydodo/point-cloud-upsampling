@@ -84,6 +84,12 @@ point-cloud-upsampling/
 │   └── pcseg_part4_pipeline_results.ipynb     # Inference, Rows E-H, evaluation
 ├── scripts/                    # Headless runners
 │   └── run_ptv3.py             # Batch runner for long PTv3 training jobs
+├── kaggle/                     # Modular Kaggle headless batch runners (T4/T4 x2)
+│   ├── README.md               # 3-stage Kaggle upload & chaining runbook
+│   ├── kaggle_utils.py         # Ephemeral scratch setup, GPU pinning, TimeGuard
+│   ├── stage1_data_and_upsampler.py (+ .ipynb) # Stage 1 data prep & PUNet
+│   ├── stage2_baselines_and_eval.py (+ .ipynb) # Stage 2 baselines & Area 5 eval
+│   └── stage3_crossfit_and_tables.py (+ .ipynb)# Stage 3 cross-fit & table export
 ├── tests/                      # Verification and regression test suite
 │   ├── synth.py                # Synthetic S3DIS generator
 │   ├── test_make_configs.py    # Config generation & hook filtering test

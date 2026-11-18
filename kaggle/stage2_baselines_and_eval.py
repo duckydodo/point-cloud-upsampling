@@ -252,8 +252,7 @@ def main():
     print(f"Stage 2 Started. {guard.status()}")
 
     # 1. Environment & Pointcept setup
-    setup_kaggle_env()
-    env_setup.prepare_pointcept()
+    setup_kaggle_env(install_spconv=True, setup_pointcept=True)
 
     # 2. Setup knobs and dataset
     prepare_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root)

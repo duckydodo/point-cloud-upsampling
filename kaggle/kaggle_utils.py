@@ -64,8 +64,34 @@ class TimeGuard:
                 f"(Remaining: {self.remaining_seconds/60:.1f}m)")
 
 
-def setup_kaggle_env(install_spconv=True):
-    """Detects CUDA version, installs fast wheels, and prepares Pointcept at commit 1342eda."""
+def _test_cuda_spconv():
+    """Runs a minimal SubMConv3d forward pass in CUDA in a subprocess to ensure spconv is working."""
+    test_code = """
+import sys, torch
+if not torch.cuda.is_available():
+    sys.exit(0)
+import spconv.pytorch as spconv
+coords = torch.unique(torch.randint(0, 20, (200, 3), device="cuda", dtype=torch.int32), dim=0)
+idx = torch.cat([torch.zeros(len(coords), 1, dtype=torch.int32, device="cuda"), coords], 1)
+x = spconv.SparseConvTensor(torch.randn(len(coords), 8, device="cuda"), idx, spatial_shape=[20, 20, 20], batch_size=1)
+y = spconv.SubMConv3d(8, 16, 3, indice_key="t").cuda()(x)
+assert y.features.shape == (len(coords), 16)
+sys.exit(0)
+"""
+    r = subprocess.run([sys.executable, "-c", test_code], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _uninstall_spconv():
+    """Uninstalls any existing spconv or cumm packages before trying the next candidate."""
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "-q", "spconv", "spconv-cu124", "spconv-cu126", "spconv-cu130", "cumm", "cumm-cu130"],
+        check=False,
+    )
+
+
+def setup_kaggle_env(install_spconv=True, setup_pointcept=False):
+    """Detects CUDA version, installs verified spconv wheels, and prepares Pointcept at commit 1342eda."""
     print("=" * 70)
     print("Initializing Kaggle Environment...")
     print(f"IS_KAGGLE: {IS_KAGGLE}")
@@ -78,8 +104,10 @@ def setup_kaggle_env(install_spconv=True):
 
     # Check CUDA and GPU
     g = settings.gpu_info()
+    has_cuda = False
     if g:
         print(f"Detected GPU 0: {g[0]} ({g[1]:.1f} GB VRAM, CC {g[2]})")
+        has_cuda = True
     else:
         print("No GPU detected by PyTorch yet.")
 
@@ -95,20 +123,44 @@ def setup_kaggle_env(install_spconv=True):
         except Exception:
             pass
 
-    # Install spconv if missing in environment and on CUDA
-    if install_spconv:
-        try:
-            import spconv.pytorch  # noqa: F401
-            print("spconv already installed.")
-        except ImportError:
-            print("Installing spconv-cu124...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "spconv-cu124"], check=False)
-            try:
-                import spconv.pytorch  # noqa: F401
-                print("spconv-cu124 installed successfully.")
-            except ImportError:
-                print("spconv-cu124 failed; attempting generic spconv...")
-                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "spconv"], check=False)
+    # CUDA-verified spconv installation
+    if install_spconv and has_cuda:
+        print("\nChecking spconv CUDA compatibility...")
+        if _test_cuda_spconv():
+            print("spconv is already installed and verified on CUDA!")
+        else:
+            print("spconv not importable or CUDA test failed. Installing verified wheels...")
+            candidates = [
+                # 1. spconv-cu126 (bundles CUDA 12.6 runtime, supports Python 3.9-3.13, natively supports T4 sm_75)
+                (["pip", "install", "-q", "spconv-cu126"], "spconv-cu126"),
+                # 2. CUDA 13.0 fallback from ratharog
+                (["pip", "install", "-q", "cumm-cu130", "spconv-cu130", "--extra-index-url", "https://ratharog.github.io/cumm-spconv/"], "spconv-cu130"),
+            ]
+            installed_ok = False
+            for cmd, name in candidates:
+                print(f"Attempting installation: {name}...")
+                _uninstall_spconv()
+                res = subprocess.run([sys.executable, "-m"] + cmd, check=False)
+                if res.returncode == 0 and _test_cuda_spconv():
+                    print(f"SUCCESS: {name} installed and verified on CUDA SubMConv3d forward pass!")
+                    installed_ok = True
+                    break
+                else:
+                    print(f"FAILED: {name} did not pass CUDA verification.")
+
+            if not installed_ok:
+                _uninstall_spconv()
+                raise RuntimeError(
+                    "CUDA-compatible spconv could not be installed/verified on this environment. "
+                    "Tested spconv-cu126 and cumm-cu130/spconv-cu130; neither passed CUDA SubMConv3d test. "
+                    "Will not fall back to CPU-only spconv as Pointcept requires CUDA sparse convolution."
+                )
+
+    # Pointcept preparation
+    if setup_pointcept:
+        print("\nPreparing Pointcept at pinned commit 1342eda with shims and patches...")
+        from pcseg import env_setup
+        env_setup.prepare_pointcept()
 
     print("=" * 70)
 

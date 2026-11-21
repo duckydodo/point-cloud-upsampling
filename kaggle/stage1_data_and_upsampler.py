@@ -30,64 +30,34 @@ from kaggle.kaggle_utils import (
     TimeGuard,
     copy_directory,
     find_input_dataset,
+    materialize_sparse25,
+    prepare_s3dis_from_kaggle_input,
     setup_kaggle_env,
+    validate_dataset,
 )
 from pcseg import env_setup, run, settings
 from pcseg.pu_data import build_patch_bank
 
 
-def prepare_datasets(smoke_test=False, custom_data_root=None):
-    """Prepares S3DIS dense and sparse25 under settings.DATA."""
-    dense_dst = settings.DENSE
-    sp25_dst = settings.SP25
+def prepare_stage1_datasets(smoke_test=False, custom_data_root=None, out_dir=None):
+    """Prepares S3DIS dense and sparse25 under settings.DATA and exports deterministic split indices."""
+    out_base = Path(out_dir or (KAGGLE_WORKING / "stage1_out"))
+    out_base.mkdir(parents=True, exist_ok=True)
 
-    if smoke_test:
-        print("[Smoke-Test] Generating synthetic S3DIS dataset (1 room per area, 1,000 points)...")
-        from tests import synth
-        dense_dst.parent.mkdir(parents=True, exist_ok=True)
-        synth.make_dataset(settings.DATA, rooms_per_area=1, n=1000, seed=0)
-        return
+    # 1. Prepare dense S3DIS from /kaggle/input or custom_data_root
+    dense_path = prepare_s3dis_from_kaggle_input(smoke_test=smoke_test, custom_data_root=custom_data_root)
 
-    # Check if custom_data_root provided or exists under /kaggle/input
-    candidate_root = None
-    if custom_data_root and Path(custom_data_root).exists():
-        candidate_root = Path(custom_data_root)
-    else:
-        found = find_input_dataset(["s3dis", "point-cloud", "pcseg-data"])
-        if found:
-            candidate_root = found
+    # 2. Deterministically materialize sparse25 and export indices
+    indices_export = out_base / "split_indices_sparse25.npz"
+    materialize_sparse25(
+        dense_root=dense_path,
+        sparse_root=settings.SP25,
+        export_indices_path=indices_export,
+        smoke_test=smoke_test,
+    )
 
-    if candidate_root:
-        print(f"Found input data root at: {candidate_root}")
-        # Look for s3dis and s3dis_sparse25 subfolders
-        src_dense = candidate_root / "s3dis" if (candidate_root / "s3dis").exists() else candidate_root
-        src_sp25 = candidate_root / "s3dis_sparse25" if (candidate_root / "s3dis_sparse25").exists() else None
-
-        if src_dense.exists() and not dense_dst.exists():
-            print(f"Linking/copying dense data from {src_dense} -> {dense_dst}...")
-            dense_dst.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.symlink(src_dense, dense_dst)
-                print("Created symlink for dense dataset.")
-            except OSError:
-                copy_directory(src_dense, dense_dst)
-
-        if src_sp25 and src_sp25.exists() and not sp25_dst.exists():
-            print(f"Linking/copying sparse25 data from {src_sp25} -> {sp25_dst}...")
-            try:
-                os.symlink(src_sp25, sp25_dst)
-                print("Created symlink for sparse25 dataset.")
-            except OSError:
-                copy_directory(src_sp25, sp25_dst)
-
-    # Verify or report status
-    if not (dense_dst.exists() and sp25_dst.exists()):
-        print("WARNING: Complete dense/sparse25 S3DIS not found in input.")
-        print(f"dense_dst exists: {dense_dst.exists()}, sp25_dst exists: {sp25_dst.exists()}")
-        print("Falling back to synthetic dataset so execution completes cleanly.")
-        from tests import synth
-        dense_dst.parent.mkdir(parents=True, exist_ok=True)
-        synth.make_dataset(settings.DATA, rooms_per_area=2, n=3000, seed=0)
+    # 3. Validate
+    validate_dataset(smoke_test=smoke_test)
 
 
 def build_banks(smoke_test=False):
@@ -241,12 +211,14 @@ def main():
     guard = TimeGuard(max_hours=args.max_hours)
     print(f"Stage 1 Started. {guard.status()}")
 
+    out_dir = Path(args.output_dir or (KAGGLE_WORKING / "stage1_out"))
+
     # 1. Environment & Pointcept setup
     setup_kaggle_env()
     env_setup.prepare_pointcept()
 
-    # 2. Dataset preparation
-    prepare_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root)
+    # 2. Dataset preparation & deterministic sparse split export
+    prepare_stage1_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root, out_dir=out_dir)
 
     # 3. Build patch banks
     train_dev, val, train_full = build_banks(smoke_test=args.smoke_test)
@@ -255,7 +227,7 @@ def main():
     train_upsamplers(train_dev, val, train_full, smoke_test=args.smoke_test, guard=guard)
 
     # 5. Export artifacts
-    export_stage1_artifacts(output_dir=args.output_dir)
+    export_stage1_artifacts(output_dir=out_dir)
     print(f"Stage 1 Successfully Finished! {guard.status()}")
 
 

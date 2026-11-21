@@ -192,12 +192,348 @@ def copy_directory(src, dst, max_size_gb=15.0):
 
 
 def find_input_dataset(dataset_name_keywords):
-    """Scans /kaggle/input for directories matching given keywords."""
+    """Scans /kaggle/input for directories matching given keywords in priority order."""
     if not KAGGLE_INPUT.exists():
         return None
-    for item in KAGGLE_INPUT.iterdir():
-        if item.is_dir():
-            name_lower = item.name.lower()
-            if any(k.lower() in name_lower for k in dataset_name_keywords):
+    for kw in dataset_name_keywords:
+        kw_l = kw.lower()
+        for item in KAGGLE_INPUT.iterdir():
+            if item.is_dir() and kw_l in item.name.lower():
                 return item
     return None
+
+
+def _validate_s3dis_dense(dense_dir, smoke_test=False):
+    """Validates S3DIS dense structure and verifies Area_5/office_19 integrity."""
+    dense_path = Path(dense_dir)
+    if not dense_path.is_dir():
+        raise FileNotFoundError(f"Dense dataset directory not found: {dense_path}")
+
+    areas = [f"Area_{i}" for i in range(1, 7)]
+    if smoke_test:
+        areas = [a for a in areas if (dense_path / a).is_dir()]
+        if not areas:
+            areas = [d.name for d in dense_path.iterdir() if d.is_dir() and d.name.startswith("Area_")]
+
+    print(f"\n[Validation] Checking dense S3DIS at {dense_path}...")
+    for a in areas:
+        area_dir = dense_path / a
+        if not area_dir.is_dir():
+            if smoke_test:
+                continue
+            raise RuntimeError(f"Missing expected {a} in {dense_path}")
+        rooms = [r for r in area_dir.iterdir() if r.is_dir()]
+        if not rooms:
+            raise RuntimeError(f"No room folders found under {area_dir}")
+        print(f"  {a}: {len(rooms)} rooms found.")
+
+    # Specific check for Area_5/office_19 (largest room, prone to OOM/corruption)
+    off19_dir = dense_path / "Area_5" / "office_19"
+    if off19_dir.is_dir():
+        print("  Verifying Area_5/office_19 integrity...")
+        for req in ["coord.npy", "color.npy", "segment.npy"]:
+            f = off19_dir / req
+            if not f.exists():
+                raise RuntimeError(f"Area_5/office_19 missing required file: {req}")
+
+        import numpy as np
+        coord = np.load(off19_dir / "coord.npy")
+        color = np.load(off19_dir / "color.npy")
+        segment = np.load(off19_dir / "segment.npy")
+
+        if coord.shape[0] != color.shape[0] or coord.shape[0] != segment.shape[0]:
+            raise ValueError(
+                f"Area_5/office_19 length mismatch: coord={coord.shape[0]}, "
+                f"color={color.shape[0]}, segment={segment.shape[0]}"
+            )
+        if coord.ndim != 2 or coord.shape[1] != 3:
+            raise ValueError(f"Area_5/office_19 invalid coord shape: {coord.shape}")
+        if color.ndim != 2 or color.shape[1] != 3:
+            raise ValueError(f"Area_5/office_19 invalid color shape: {color.shape}")
+        if not (np.isfinite(coord[:1000]).all() and np.isfinite(color[:1000]).all()):
+            raise ValueError("Area_5/office_19 contains non-finite values in coord or color sample.")
+        print(f"  Area_5/office_19 integrity OK: {len(coord):,} points, valid coord/color/segment.")
+    else:
+        if not smoke_test:
+            print("  Notice: Area_5/office_19 not present for individual inspection.")
+
+
+def prepare_s3dis_from_kaggle_input(smoke_test=False, custom_data_root=None):
+    """Locates and prepares S3DIS dense dataset under settings.DENSE (/tmp/workspace/data/s3dis).
+
+    Supports three Kaggle input mount structures:
+    (a) Directory containing s3dis/Area_1..Area_6 (symlink or copy)
+    (b) Directory containing Area_1..Area_6 directly at root (symlink or copy)
+    (c) Archive containing s3dis_dense.tar or *.tar* (extract and normalize)
+    """
+    import numpy as np
+    target_dense = settings.DENSE
+    settings.DATA.mkdir(parents=True, exist_ok=True)
+
+    if smoke_test:
+        print("[Smoke-Test] Generating synthetic S3DIS dataset (1 room per area, 1,000 points)...")
+        from tests import synth
+        synth.make_dataset(settings.DATA, rooms_per_area=1, n=1000, seed=0)
+        _validate_s3dis_dense(target_dense, smoke_test=True)
+        return target_dense
+
+    # Clean up broken symlink if present
+    if target_dense.is_symlink() and not target_dense.exists():
+        print(f"Cleaning up broken symlink at {target_dense}")
+        target_dense.unlink()
+
+    # Check if target_dense is already populated and valid
+    if target_dense.is_dir() and (target_dense / "Area_1").is_dir():
+        print(f"S3DIS dense dataset already present at {target_dense}")
+        _validate_s3dis_dense(target_dense, smoke_test=False)
+        return target_dense
+
+    # Identify candidate search locations
+    candidates = []
+    if custom_data_root and Path(custom_data_root).exists():
+        candidates.append(Path(custom_data_root))
+    elif KAGGLE_INPUT.exists():
+        kw_priority = ["s3dis-dense", "s3dis", "stanford", "point-cloud", "pcseg-data", "data"]
+        for kw in kw_priority:
+            for item in KAGGLE_INPUT.iterdir():
+                if item.is_dir() and kw in item.name.lower() and item not in candidates:
+                    candidates.append(item)
+        # Also append any remaining directories or archives under /kaggle/input
+        for item in KAGGLE_INPUT.iterdir():
+            if item not in candidates:
+                candidates.append(item)
+
+    print(f"Candidate dataset locations: {[str(c) for c in candidates]}")
+
+    prepared = False
+    for cand in candidates:
+        # Case (a): cand / "s3dis" exists and contains Area_1
+        if (cand / "s3dis").is_dir() and ((cand / "s3dis" / "Area_1").is_dir() or list((cand / "s3dis").glob("Area_*"))):
+            src_dense = cand / "s3dis"
+            print(f"Found Case (a) layout at {src_dense}. Linking to {target_dense}...")
+            if target_dense.is_symlink():
+                target_dense.unlink()
+            try:
+                os.symlink(src_dense.resolve(), target_dense)
+                print(f"Created symlink: {target_dense} -> {src_dense.resolve()}")
+            except OSError:
+                copy_directory(src_dense, target_dense)
+            prepared = True
+            break
+
+        # Case (b): cand contains Area_1 directly at root
+        if cand.is_dir() and ((cand / "Area_1").is_dir() or list(cand.glob("Area_*"))):
+            print(f"Found Case (b) layout at {cand}. Linking to {target_dense}...")
+            if target_dense.is_symlink():
+                target_dense.unlink()
+            try:
+                os.symlink(cand.resolve(), target_dense)
+                print(f"Created symlink: {target_dense} -> {cand.resolve()}")
+            except OSError:
+                copy_directory(cand, target_dense)
+            prepared = True
+            break
+
+        # Case (c): cand is or contains a tar archive
+        tar_files = []
+        if cand.is_file() and any(cand.name.endswith(ext) for ext in [".tar", ".tar.gz", ".tgz", ".tar.xz"]):
+            tar_files = [cand]
+        elif cand.is_dir():
+            tar_files = list(cand.glob("*.tar*"))
+
+        if tar_files:
+            # Prioritize dense archive
+            tar_files.sort(key=lambda p: 0 if "dense" in p.name.lower() else (1 if "s3dis" in p.name.lower() else 2))
+            chosen_tar = tar_files[0]
+            print(f"Found Case (c) archive {chosen_tar}. Extracting into {settings.DATA}...")
+            subprocess.run(["tar", "-xf", str(chosen_tar), "-C", str(settings.DATA)], check=True)
+            print(f"Extraction of {chosen_tar.name} complete. Normalizing layout...")
+
+            # Normalize extracted structure
+            if (target_dense / "Area_1").is_dir():
+                print(f"Layout already normalized at {target_dense}")
+            elif (settings.DATA / "Area_1").is_dir():
+                print(f"Moving extracted Area_* into {target_dense}...")
+                target_dense.mkdir(parents=True, exist_ok=True)
+                for area_dir in settings.DATA.glob("Area_*"):
+                    if area_dir.is_dir() and area_dir != target_dense:
+                        shutil.move(str(area_dir), str(target_dense / area_dir.name))
+            else:
+                # Search for nested Area_1
+                nested_area = None
+                for p in settings.DATA.rglob("Area_1"):
+                    if p.is_dir() and p.parent != target_dense:
+                        nested_area = p.parent
+                        break
+                if nested_area:
+                    print(f"Found nested directory {nested_area}. Moving into {target_dense}...")
+                    target_dense.mkdir(parents=True, exist_ok=True)
+                    for area_dir in nested_area.glob("Area_*"):
+                        if area_dir.is_dir():
+                            shutil.move(str(area_dir), str(target_dense / area_dir.name))
+
+            prepared = True
+            break
+
+    if not prepared or not target_dense.exists() or not (target_dense / "Area_1").is_dir():
+        print("WARNING: Complete S3DIS dense dataset not found in candidates.")
+        print("Falling back to synthetic dataset generation so execution proceeds.")
+        from tests import synth
+        synth.make_dataset(settings.DATA, rooms_per_area=2, n=3000, seed=0)
+        _validate_s3dis_dense(target_dense, smoke_test=True)
+        return target_dense
+
+    _validate_s3dis_dense(target_dense, smoke_test=smoke_test)
+    return target_dense
+
+
+def materialize_sparse25(
+    dense_root=None,
+    sparse_root=None,
+    indices_file=None,
+    export_indices_path=None,
+    keep_ratio=0.25,
+    seed=42,
+    smoke_test=False,
+):
+    """Deterministically generates or restores s3dis_sparse25 from dense_root.
+
+    If indices_file is provided (e.g. split_indices_sparse25.npz from Stage 1),
+    subsamples using the exact stored indices. Otherwise, computes deterministic
+    per-room seeds using a SHA-256 room key hash.
+
+    Optionally exports split_indices_sparse25.npz and split_metadata.json.
+    """
+    import hashlib
+    import json
+    import numpy as np
+
+    dense_path = Path(dense_root or settings.DENSE)
+    sparse_path = Path(sparse_root or settings.SP25)
+    sparse_path.mkdir(parents=True, exist_ok=True)
+
+    loaded_indices = None
+    if indices_file and Path(indices_file).exists():
+        print(f"Loading pre-computed sparse split indices from {indices_file}...")
+        loaded_indices = np.load(indices_file)
+
+    all_indices = {}
+    total_dense_pts = 0
+    total_sparse_pts = 0
+
+    area_dirs = sorted([d for d in dense_path.iterdir() if d.is_dir() and d.name.startswith("Area_")])
+    if not area_dirs:
+        raise RuntimeError(f"No Area_* folders found in dense root: {dense_path}")
+
+    print(f"\n--- Materializing Sparse25 ({keep_ratio*100:.1f}%) into {sparse_path} ---")
+    for area_dir in area_dirs:
+        area_name = area_dir.name
+        sparse_area_dir = sparse_path / area_name
+        sparse_area_dir.mkdir(parents=True, exist_ok=True)
+
+        room_dirs = sorted([r for r in area_dir.iterdir() if r.is_dir()])
+        for room_dir in room_dirs:
+            room_name = room_dir.name
+            sparse_room_dir = sparse_area_dir / room_name
+            room_key = f"{area_name}/{room_name}"
+
+            coord_path = room_dir / "coord.npy"
+            color_path = room_dir / "color.npy"
+            segment_path = room_dir / "segment.npy"
+
+            if not (coord_path.exists() and color_path.exists()):
+                continue
+
+            dense_coord = np.load(coord_path)
+            dense_color = np.load(color_path)
+            dense_segment = np.load(segment_path) if segment_path.exists() else None
+            n = dense_coord.shape[0]
+
+            # Determine indices
+            if loaded_indices is not None and room_key in loaded_indices:
+                idx = loaded_indices[room_key]
+            elif loaded_indices is not None and room_key.replace("/", "_") in loaded_indices:
+                idx = loaded_indices[room_key.replace("/", "_")]
+            else:
+                # Deterministic per-room hashing
+                hash_val = int(hashlib.sha256(f"{area_name}_{room_name}_{keep_ratio}".encode()).hexdigest()[:8], 16)
+                room_seed = (seed + hash_val) % (2**31 - 1)
+                rng = np.random.default_rng(room_seed)
+                k = max(1, int(round(n * keep_ratio)))
+                idx = np.sort(rng.choice(n, k, replace=False))
+
+            all_indices[room_key] = idx
+            total_dense_pts += n
+            total_sparse_pts += len(idx)
+
+            # Check if already written with matching count
+            target_coord = sparse_room_dir / "coord.npy"
+            needs_write = True
+            if target_coord.exists():
+                try:
+                    existing = np.load(target_coord, mmap_mode="r")
+                    if len(existing) == len(idx):
+                        needs_write = False
+                except Exception:
+                    needs_write = True
+
+            if needs_write:
+                sparse_room_dir.mkdir(parents=True, exist_ok=True)
+                np.save(sparse_room_dir / "coord.npy", dense_coord[idx])
+                np.save(sparse_room_dir / "color.npy", dense_color[idx])
+                if dense_segment is not None:
+                    np.save(sparse_room_dir / "segment.npy", dense_segment[idx])
+
+    actual_ratio = total_sparse_pts / max(1, total_dense_pts)
+    print(f"Materialized {len(all_indices)} rooms: {total_sparse_pts:,} / {total_dense_pts:,} pts (ratio: {actual_ratio:.4f})")
+
+    # Export split indices and metadata if requested
+    if export_indices_path:
+        out_npz = Path(export_indices_path)
+        out_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(out_npz, **all_indices)
+        size_mb = out_npz.stat().st_size / (1024 ** 2)
+        print(f"Exported deterministic sparse indices: {out_npz} ({size_mb:.2f} MB)")
+
+        meta = {
+            "keep_ratio": keep_ratio,
+            "seed": seed,
+            "num_rooms": len(all_indices),
+            "total_dense_pts": total_dense_pts,
+            "total_sparse_pts": total_sparse_pts,
+            "actual_ratio": round(actual_ratio, 6),
+            "created_at": time.ctime(),
+        }
+        meta_file = out_npz.parent / "split_metadata.json"
+        meta_file.write_text(json.dumps(meta, indent=2))
+        print(f"Exported split metadata: {meta_file}")
+
+    return sparse_path
+
+
+def validate_dataset(smoke_test=False):
+    """Runs pcseg.data_check sanity checks on settings.DENSE and settings.SP25."""
+    print("\n--- Validating Datasets (pcseg.data_check) ---")
+    if smoke_test:
+        from pcseg.data_check import _check_root
+        problems = []
+        # In smoke-test mode, Area 5 may have any number of synthetic rooms.
+        # Pass actual Area 5 room count so _check_root verifies consistency between dense and sparse25.
+        a5_rooms = len([r for r in (settings.DENSE / "Area_5").iterdir() if r.is_dir()]) if (settings.DENSE / "Area_5").is_dir() else None
+        d = _check_root(settings.DENSE, "s3dis (dense)", True, problems, expect_a5=a5_rooms)
+        s25 = _check_root(settings.SP25, "s3dis_sparse25", False, problems, expect_a5=a5_rooms)
+        problems = [p for p in problems if "expected None" not in p]
+        print("Smoke-test dataset validation:")
+        print("  Dense rooms per area   :", d)
+        print("  Sparse25 rooms per area:", s25)
+        if problems:
+            print("  Problems noted:", problems)
+            return False
+        print("  Smoke-test dataset validation PASSED.")
+        return True
+    else:
+        from pcseg import data_check
+        ok = data_check.check(verbose=True)
+        if not ok:
+            print("WARNING: Dataset validation detected potential problems (see above).")
+        return ok

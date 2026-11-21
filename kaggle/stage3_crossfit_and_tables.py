@@ -31,7 +31,10 @@ from kaggle.kaggle_utils import (
     TimeGuard,
     copy_directory,
     find_input_dataset,
+    materialize_sparse25,
+    prepare_s3dis_from_kaggle_input,
     setup_kaggle_env,
+    validate_dataset,
 )
 from pcseg import env_setup, experiments, results, run, settings
 from pcseg.common import CLASS_NAMES
@@ -93,48 +96,28 @@ def locate_previous_stages(stage1_input=None, stage2_input=None):
                             else:
                                 shutil.copy2(s, dst_exp / sub)
 
+    return cand1, cand2
 
-def prepare_datasets(smoke_test=False, custom_data_root=None):
-    """Ensures S3DIS datasets are available in settings.DATA."""
-    dense_dst = settings.DENSE
-    sp25_dst = settings.SP25
 
-    if smoke_test:
-        print("[Smoke-Test] Generating synthetic S3DIS dataset...")
-        from tests import synth
-        dense_dst.parent.mkdir(parents=True, exist_ok=True)
-        synth.make_dataset(settings.DATA, rooms_per_area=1, n=1000, seed=0)
-        return
+def prepare_stage3_datasets(smoke_test=False, custom_data_root=None, stage1_dir=None):
+    """Ensures S3DIS dense and sparse25 datasets are available, reusing Stage 1 split indices if present."""
+    dense_path = prepare_s3dis_from_kaggle_input(smoke_test=smoke_test, custom_data_root=custom_data_root)
 
-    candidate_root = None
-    if custom_data_root and Path(custom_data_root).exists():
-        candidate_root = Path(custom_data_root)
-    else:
-        found = find_input_dataset(["s3dis", "point-cloud", "pcseg-data"])
-        if found:
-            candidate_root = found
+    indices_file = None
+    if stage1_dir:
+        cand_indices = Path(stage1_dir) / "split_indices_sparse25.npz"
+        if cand_indices.exists():
+            indices_file = cand_indices
+            print(f"Reusing Stage 1 sparse split indices from: {indices_file}")
 
-    if candidate_root:
-        src_dense = candidate_root / "s3dis" if (candidate_root / "s3dis").exists() else candidate_root
-        src_sp25 = candidate_root / "s3dis_sparse25" if (candidate_root / "s3dis_sparse25").exists() else None
+    materialize_sparse25(
+        dense_root=dense_path,
+        sparse_root=settings.SP25,
+        indices_file=indices_file,
+        smoke_test=smoke_test,
+    )
 
-        if src_dense.exists() and not dense_dst.exists():
-            dense_dst.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.symlink(src_dense, dense_dst)
-            except OSError:
-                copy_directory(src_dense, dense_dst)
-
-        if src_sp25 and src_sp25.exists() and not sp25_dst.exists():
-            try:
-                os.symlink(src_sp25, sp25_dst)
-            except OSError:
-                copy_directory(src_sp25, sp25_dst)
-
-    if not (dense_dst.exists() and sp25_dst.exists()):
-        from tests import synth
-        dense_dst.parent.mkdir(parents=True, exist_ok=True)
-        synth.make_dataset(settings.DATA, rooms_per_area=2, n=3000, seed=0)
+    validate_dataset(smoke_test=smoke_test)
 
 
 def generate_crossfit_upsampled_data(smoke_test=False):
@@ -284,8 +267,8 @@ def main():
     setup_kaggle_env(install_spconv=True, setup_pointcept=True)
 
     # 2. Setup knobs and inputs
-    prepare_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root)
-    locate_previous_stages(stage1_input=args.stage1_input, stage2_input=args.stage2_input)
+    cand1, cand2 = locate_previous_stages(stage1_input=args.stage1_input, stage2_input=args.stage2_input)
+    prepare_stage3_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root, stage1_dir=cand1)
 
     knobs = settings.load_knobs()
     if args.smoke_test:

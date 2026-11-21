@@ -11,8 +11,13 @@ os.environ["PCSEG_ROOT"] = tmp
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import unittest
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:
+    raise unittest.SkipTest("PyTorch not installed in this environment; skipping test_torch_cpu.py")
 
 from pcseg import pu_infer, pu_train, settings
 from pcseg.common import load_room, room_dirs

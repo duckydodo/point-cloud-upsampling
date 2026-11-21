@@ -33,8 +33,11 @@ from kaggle.kaggle_utils import (
     KAGGLE_WORKING,
     SCRATCH_ROOT,
     TimeGuard,
+    checkpoint_mirror,
     copy_directory,
     find_input_dataset,
+    locate_stage1_artifacts,
+    log_disk_usage,
     materialize_sparse25,
     prepare_s3dis_from_kaggle_input,
     setup_kaggle_env,
@@ -43,83 +46,18 @@ from kaggle.kaggle_utils import (
 from pcseg import env_setup, experiments, run, settings
 
 
-def locate_stage1_artifacts(stage1_input_dir=None):
-    """Finds trained upsampler weights and split indices from Stage 1."""
-    candidate = None
-    if stage1_input_dir and Path(stage1_input_dir).exists():
-        candidate = Path(stage1_input_dir)
-    else:
-        found = find_input_dataset(["stage1", "upsampler", "stage-1"])
-        if found:
-            candidate = found
-
-    if candidate:
-        print(f"Found Stage 1 inputs at: {candidate}")
-        # Copy upsampler weights to settings.UPSAMPLER
-        src_ups = candidate / "upsampler" if (candidate / "upsampler").exists() else candidate
-        if src_ups.exists():
-            for m in src_ups.glob("*"):
-                if m.is_dir():
-                    dst_m = settings.UPSAMPLER / m.name
-                    dst_m.mkdir(parents=True, exist_ok=True)
-                    for f in ["best.pt", "last.pt", "log.json"]:
-                        if (m / f).exists():
-                            shutil.copy2(m / f, dst_m / f)
-            print("Imported Stage 1 upsampler checkpoints.")
-
-    # Check if full_x4 checkpoint is present
-    full_ckpt = settings.UPSAMPLER / "full_x4" / "last.pt"
-    if not full_ckpt.exists():
-        dev_ckpt = settings.UPSAMPLER / "dev_x4" / "last.pt"
-        if dev_ckpt.exists():
-            print(f"full_x4 not found, falling back to dev_x4: {dev_ckpt}")
-            (settings.UPSAMPLER / "full_x4").mkdir(parents=True, exist_ok=True)
-            shutil.copy2(dev_ckpt, full_ckpt)
-        else:
-            print("Notice: No Stage 1 checkpoint found. If not running smoke-test, Row G will require upsampler.")
-
-    return candidate
-
-
-def prepare_stage2_datasets(smoke_test=False, custom_data_root=None, stage1_dir=None):
+def prepare_stage2_datasets(smoke_test=False, custom_data_root=None, split_indices_path=None):
     """Ensures S3DIS dense and sparse25 datasets are available, reusing Stage 1 split indices if present."""
     dense_path = prepare_s3dis_from_kaggle_input(smoke_test=smoke_test, custom_data_root=custom_data_root)
-
-    indices_file = None
-    if stage1_dir:
-        cand_indices = Path(stage1_dir) / "split_indices_sparse25.npz"
-        if cand_indices.exists():
-            indices_file = cand_indices
-            print(f"Reusing Stage 1 sparse split indices from: {indices_file}")
 
     materialize_sparse25(
         dense_root=dense_path,
         sparse_root=settings.SP25,
-        indices_file=indices_file,
+        indices_file=split_indices_path,
         smoke_test=smoke_test,
     )
 
     validate_dataset(smoke_test=smoke_test)
-
-
-def checkpoint_mirror(name, output_dir):
-    """Copies current checkpoints for experiment `name` to output_dir immediately."""
-    src = settings.EXP / name
-    dst = Path(output_dir) / "exp" / name
-    if src.exists():
-        dst.mkdir(parents=True, exist_ok=True)
-        for sub in ["model", "test_dense", "test_sparse25", "test_up25x4", "test_interp25x4"]:
-            sub_src = src / sub
-            if sub_src.exists():
-                sub_dst = dst / sub
-                sub_dst.mkdir(parents=True, exist_ok=True)
-                for f in sub_src.glob("*"):
-                    if f.is_file():
-                        shutil.copy2(f, sub_dst / f.name)
-        for meta in ["config.py", "train.log", "train_done.json"]:
-            if (src / meta).exists():
-                shutil.copy2(src / meta, dst / meta)
-        print(f"[Checkpoint-Mirror] Mirrored {name} to {dst}")
 
 
 def train_baselines(knobs, smoke_test=False, guard=None, output_dir=None):
@@ -209,16 +147,19 @@ def export_stage2_artifacts(output_dir=None):
             for f in ["config.py", "train.log", "train_done.json"]:
                 if (exp_dir / f).exists():
                     shutil.copy2(exp_dir / f, target_exp / f)
-            # Model weights
+            # Model weights (only model_best.pth and model_last.pth; strictly exclude bulky epoch_*.pth)
             model_src = exp_dir / "model"
             if model_src.exists():
                 (target_exp / "model").mkdir(parents=True, exist_ok=True)
-                for w in model_src.glob("*.pth"):
-                    shutil.copy2(w, target_exp / "model" / w.name)
-                    print(f"Saved checkpoint: {exp_dir.name}/model/{w.name}")
+                for w_name in ("model_best.pth", "model_last.pth"):
+                    w = model_src / w_name
+                    if w.exists():
+                        shutil.copy2(w, target_exp / "model" / w_name)
+                        print(f"Saved checkpoint: {exp_dir.name}/model/{w_name}")
 
     total_bytes = sum(f.stat().st_size for f in out_base.rglob("*") if f.is_file())
     print(f"Stage 2 Artifact Export Complete! Total size: {total_bytes / (1024 ** 2):.2f} MB")
+    log_disk_usage(out_base)
 
 
 def main():
@@ -237,8 +178,8 @@ def main():
     setup_kaggle_env(install_spconv=True, setup_pointcept=True)
 
     # 2. Setup knobs and dataset
-    stage1_dir = locate_stage1_artifacts(stage1_input_dir=args.stage1_input)
-    prepare_stage2_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root, stage1_dir=stage1_dir)
+    stage1_dir, split_indices_path = locate_stage1_artifacts(stage1_input_dir=args.stage1_input, smoke_test=args.smoke_test)
+    prepare_stage2_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root, split_indices_path=split_indices_path)
 
     knobs = settings.load_knobs()
     if args.smoke_test:

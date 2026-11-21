@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pcseg import settings
+settings.refresh_paths()
 
 
 class TimeGuard:
@@ -201,6 +202,226 @@ def find_input_dataset(dataset_name_keywords):
             if item.is_dir() and kw_l in item.name.lower():
                 return item
     return None
+
+
+def get_directory_size_mb(path):
+    """Calculates total size of all files under path in megabytes."""
+    p = Path(path)
+    if not p.exists():
+        return 0.0
+    total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    return total / (1024 * 1024)
+
+
+def log_disk_usage(output_dir, max_safe_gb=15.0):
+    """Logs current disk usage of output_dir against the safe threshold."""
+    size_mb = get_directory_size_mb(output_dir)
+    size_gb = size_mb / 1024.0
+    print(f"\n--- Disk Usage Check: {output_dir} ---")
+    print(f"Total size: {size_mb:.2f} MB ({size_gb:.3f} GB) / Safe Cap: {max_safe_gb:.1f} GB")
+    if size_gb > max_safe_gb:
+        print(f"WARNING: Output directory ({size_gb:.2f} GB) exceeds safe threshold ({max_safe_gb} GB)!")
+    else:
+        print(f"Disk headroom remaining: {max_safe_gb - size_gb:.2f} GB OK.")
+    return size_gb
+
+
+def list_kaggle_inputs():
+    """Returns a readable multi-line summary of files and folders in /kaggle/input."""
+    if not KAGGLE_INPUT.exists():
+        return f"Input directory {KAGGLE_INPUT} does not exist."
+    lines = [f"{KAGGLE_INPUT}:"]
+    for item in sorted(KAGGLE_INPUT.iterdir()):
+        if item.is_dir():
+            sub_count = len(list(item.iterdir()))
+            lines.append(f"  [dir]  {item.name} ({sub_count} items)")
+            for sub in sorted(item.iterdir())[:8]:
+                if sub.is_dir():
+                    lines.append(f"    [dir]  {sub.name}/")
+                else:
+                    lines.append(f"    [file] {sub.name} ({sub.stat().st_size / (1024**2):.2f} MB)")
+            if sub_count > 8:
+                lines.append(f"    ... ({sub_count - 8} more items)")
+        else:
+            lines.append(f"  [file] {item.name} ({item.stat().st_size / (1024**2):.2f} MB)")
+    return "\n".join(lines)
+
+
+def locate_stage1_artifacts(stage1_input_dir=None, smoke_test=False):
+    """Recursively locates Stage 1 upsampler checkpoints and split indices.
+
+    Searches stage1_input_dir and /kaggle/input recursively regardless of folder nesting.
+    Imports models into settings.UPSAMPLER and returns (stage1_dir, split_indices_path).
+    Fails fast with actionable input diagnostic if required artifacts are missing in non-smoke runs.
+    """
+    settings.refresh_paths()
+    search_roots = []
+    if stage1_input_dir and Path(stage1_input_dir).exists():
+        search_roots.append(Path(stage1_input_dir))
+    elif KAGGLE_INPUT.exists():
+        for item in KAGGLE_INPUT.iterdir():
+            if item.is_dir():
+                search_roots.append(item)
+
+    found_upsamplers = False
+    found_indices = None
+    stage1_dir = None
+
+    for root in search_roots:
+        # Search for split_indices_sparse25.npz
+        if not found_indices:
+            for npz in root.rglob("split_indices_sparse25.npz"):
+                found_indices = npz
+                stage1_dir = root
+                break
+
+        # Search for best.pt or last.pt
+        for ckpt in root.rglob("*.pt"):
+            if ckpt.name in ("best.pt", "last.pt"):
+                model_name = ckpt.parent.name
+                if model_name in ("upsampler", "stage1_out", "stage1", "working", "kaggle_output"):
+                    model_name = "full_x4"
+                dst_m = settings.UPSAMPLER / model_name
+                dst_m.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ckpt, dst_m / ckpt.name)
+                # Also copy log.json if adjacent
+                if (ckpt.parent / "log.json").exists():
+                    shutil.copy2(ckpt.parent / "log.json", dst_m / "log.json")
+                found_upsamplers = True
+                stage1_dir = root
+                print(f"Imported Stage 1 upsampler checkpoint: {ckpt} -> {dst_m / ckpt.name}")
+
+    # Fallback check: if full_x4 wasn't found but dev_x4 was, copy dev_x4 as full_x4
+    full_ckpt = settings.UPSAMPLER / "full_x4" / "last.pt"
+    if not full_ckpt.exists():
+        dev_ckpt = settings.UPSAMPLER / "dev_x4" / "last.pt"
+        if dev_ckpt.exists():
+            print(f"full_x4 not found, duplicating dev_x4 as full_x4: {dev_ckpt}")
+            (settings.UPSAMPLER / "full_x4").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dev_ckpt, full_ckpt)
+            if (settings.UPSAMPLER / "dev_x4" / "best.pt").exists():
+                shutil.copy2(settings.UPSAMPLER / "dev_x4" / "best.pt", settings.UPSAMPLER / "full_x4" / "best.pt")
+            found_upsamplers = True
+
+    if not found_upsamplers and not smoke_test:
+        listing = list_kaggle_inputs()
+        raise RuntimeError(
+            "ERROR: Stage 1 artifacts not found!\n"
+            "Looked recursively for 'best.pt' and 'split_indices_sparse25.npz' under /kaggle/input.\n"
+            "Please mount your Stage 1 notebook output as an Input Dataset in this Kaggle session.\n\n"
+            f"Current /kaggle/input contents:\n{listing}"
+        )
+
+    if found_indices:
+        print(f"Found Stage 1 sparse split indices: {found_indices}")
+    elif not smoke_test:
+        print("Notice: split_indices_sparse25.npz not found; will use deterministic seed formula.")
+
+    return stage1_dir, found_indices
+
+
+def locate_stage2_artifacts(stage2_input_dir=None, smoke_test=False):
+    """Recursively locates Stage 2 baseline evaluations and checkpoints.
+
+    Searches stage2_input_dir and /kaggle/input recursively regardless of folder nesting.
+    Imports results into settings.RESULTS and models into settings.EXP.
+    Fails fast with actionable input diagnostic if required artifacts are missing in non-smoke runs.
+    """
+    settings.refresh_paths()
+    search_roots = []
+    if stage2_input_dir and Path(stage2_input_dir).exists():
+        search_roots.append(Path(stage2_input_dir))
+    elif KAGGLE_INPUT.exists():
+        for item in KAGGLE_INPUT.iterdir():
+            if item.is_dir():
+                search_roots.append(item)
+
+    found_results = 0
+    stage2_dir = None
+    settings.RESULTS.mkdir(parents=True, exist_ok=True)
+
+    for root in search_roots:
+        # Search for evaluation JSON files
+        for jf in root.rglob("*.json"):
+            if "_on_" in jf.name or jf.name in ("stage2_summary.json", "A_dense_on_dense.json"):
+                shutil.copy2(jf, settings.RESULTS / jf.name)
+                found_results += 1
+                stage2_dir = root
+                print(f"Imported baseline evaluation metric: {jf.name}")
+
+        # Search for exp model checkpoints (model_last.pth or model_best.pth)
+        for ckpt in root.rglob("model_*.pth"):
+            parts = ckpt.parts
+            exp_name = None
+            if "model" in parts:
+                idx = parts.index("model")
+                if idx > 0:
+                    exp_name = parts[idx - 1]
+            if exp_name:
+                dst_exp = settings.EXP / exp_name / "model"
+                dst_exp.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ckpt, dst_exp / ckpt.name)
+                # Copy adjacent config.py if present
+                exp_src = ckpt.parent.parent
+                if (exp_src / "config.py").exists():
+                    shutil.copy2(exp_src / "config.py", settings.EXP / exp_name / "config.py")
+                stage2_dir = root
+                print(f"Imported baseline checkpoint: {exp_name}/{ckpt.name}")
+
+    if found_results == 0 and not smoke_test:
+        listing = list_kaggle_inputs()
+        raise RuntimeError(
+            "ERROR: Stage 2 artifacts not found!\n"
+            "Looked recursively for baseline results (*_on_*.json) and checkpoints under /kaggle/input.\n"
+            "Please mount your Stage 2 notebook output as an Input Dataset in this Kaggle session.\n\n"
+            f"Current /kaggle/input contents:\n{listing}"
+        )
+
+    print(f"Located {found_results} Stage 2 evaluation metrics.")
+    return stage2_dir
+
+
+def checkpoint_mirror(name, output_dir):
+    """Copies minimal, essential checkpoints and logs for experiment `name` to output_dir.
+
+    Strictly excludes bulky intermediate epoch_*.pth checkpoints to stay well within
+    the 19.5 GB /kaggle/working disk cap.
+    """
+    src = settings.EXP / name
+    dst = Path(output_dir) / "exp" / name
+    if not src.exists():
+        return
+
+    dst.mkdir(parents=True, exist_ok=True)
+
+    # 1. Copy ONLY model_best.pth and model_last.pth from model/
+    src_model = src / "model"
+    if src_model.exists():
+        dst_model = dst / "model"
+        dst_model.mkdir(parents=True, exist_ok=True)
+        for allowed in ("model_best.pth", "model_last.pth"):
+            f = src_model / allowed
+            if f.exists():
+                shutil.copy2(f, dst_model / allowed)
+
+    # 2. Copy configs, logs, and metadata files
+    for meta_file in ["config.py", "train.log", "train_done.json", "stdout.txt"]:
+        s = src / meta_file
+        if s.exists():
+            shutil.copy2(s, dst / meta_file)
+
+    # 3. Copy test results summaries (seconds.txt, test log) without duplicating huge arrays
+    for test_dir in src.glob("test_*"):
+        if test_dir.is_dir():
+            dst_test = dst / test_dir.name
+            dst_test.mkdir(parents=True, exist_ok=True)
+            for f in test_dir.glob("*.txt"):
+                shutil.copy2(f, dst_test / f.name)
+            for f in test_dir.glob("*.log"):
+                shutil.copy2(f, dst_test / f.name)
+
+    usage_mb = get_directory_size_mb(output_dir)
+    print(f"[Checkpoint-Mirror] Mirrored {name} -> {dst} | Output usage: {usage_mb:.2f} MB")
 
 
 def _validate_s3dis_dense(dense_dir, smoke_test=False):

@@ -224,9 +224,53 @@ class SphereCrop(object):
 '''
 
 
+TORCH_LOAD_PATCH = '''
+# ---- pcseg patch: PyTorch 2.6+ safe checkpoint loading (weights_only=False) ----
+try:
+    import torch
+    if not getattr(torch, "_pcseg_safe_load_installed", False):
+        _orig_torch_load = torch.load
+        def _safe_torch_load(*args, **kwargs):
+            if "weights_only" not in kwargs:
+                try:
+                    return _orig_torch_load(*args, weights_only=False, **kwargs)
+                except TypeError:
+                    pass
+            return _orig_torch_load(*args, **kwargs)
+        torch.load = _safe_torch_load
+        torch._pcseg_safe_load_installed = True
+except Exception:
+    pass
+'''
+
+
+def install_torch_load_patch():
+    """Patches torch.load in the current process to default to weights_only=False on PyTorch 2.6+."""
+    try:
+        import torch
+        if getattr(torch, "_pcseg_safe_load_installed", False):
+            return
+        orig_load = torch.load
+        def safe_load(*args, **kwargs):
+            if "weights_only" not in kwargs:
+                try:
+                    return orig_load(*args, weights_only=False, **kwargs)
+                except TypeError:
+                    pass
+            return orig_load(*args, **kwargs)
+        torch.load = safe_load
+        torch._pcseg_safe_load_installed = True
+    except Exception:
+        pass
+
+
+install_torch_load_patch()
+
+
 def patch_pointcept(pointcept_dir=None):
-    """Idempotently append RandomSparsify and SphereCrop (mode='all') to Pointcept's transform module."""
-    f = Path(pointcept_dir or settings.POINTCEPT) / "pointcept" / "datasets" / "transform.py"
+    """Idempotently append RandomSparsify, SphereCrop (mode='all'), and weights_only=False safe torch.load to Pointcept."""
+    pdir = Path(pointcept_dir or settings.POINTCEPT)
+    f = pdir / "pointcept" / "datasets" / "transform.py"
     if not f.exists():
         return False
     text = f.read_text()
@@ -239,5 +283,13 @@ def patch_pointcept(pointcept_dir=None):
         patched = True
     if patched:
         f.write_text(text)
+
+    # Patch pointcept/__init__.py for safe checkpoint loading on PyTorch 2.6+
+    p_init = pdir / "pointcept" / "__init__.py"
+    if p_init.exists():
+        init_text = p_init.read_text()
+        if "_safe_torch_load" not in init_text:
+            p_init.write_text(init_text + "\n" + TORCH_LOAD_PATCH)
+            patched = True
     return patched
 

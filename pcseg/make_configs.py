@@ -32,7 +32,8 @@ def make_config(name, train_root, test_root, *, pointcept_dir=None, batch_size=4
 
     cfg = Config.fromfile(str(pointcept_dir / BASE))
     cfg.model.backbone.in_channels = 3
-    cfg.batch_size, cfg.num_worker = batch_size, num_worker
+    cfg.batch_size = batch_size
+    cfg.num_worker = settings.safe_shm_workers(num_worker)
     cfg.epoch, cfg.eval_epoch = epoch, eval_epoch
     assert epoch % eval_epoch == 0, "epoch must be a multiple of eval_epoch (checkpoint every epoch//eval_epoch passes)"
     cfg.evaluate = False

@@ -31,9 +31,42 @@ UP25X4, INTERP25X4 = DATA / "s3dis_up25x4", DATA / "s3dis_interp25x4"
 SETTINGS_FILE = ROOT / "pcseg_settings.json"
 
 
+def refresh_paths():
+    """Refreshes all module-level Path objects from environment variables."""
+    global ROOT, DATA, POINTCEPT, EXP, RESULTS, BANKS, UPSAMPLER, FIGURES, STUBS
+    global DENSE, SP25, SP12, UP25X4, INTERP25X4, SETTINGS_FILE
+    ROOT = Path(os.environ.get("PCSEG_ROOT", PROJECT / "workspace")).expanduser().resolve()
+    DATA = Path(os.environ.get("PCSEG_DATA", ROOT / "data")).expanduser().resolve()
+    POINTCEPT = Path(os.environ.get("POINTCEPT_DIR", ROOT / "Pointcept")).expanduser().resolve()
+    EXP, RESULTS, BANKS = ROOT / "exp", ROOT / "results", ROOT / "banks"
+    UPSAMPLER, FIGURES, STUBS = ROOT / "upsampler", ROOT / "figures", ROOT / "stubs"
+    DENSE, SP25, SP12 = DATA / "s3dis", DATA / "s3dis_sparse25", DATA / "s3dis_sparse12"
+    UP25X4, INTERP25X4 = DATA / "s3dis_up25x4", DATA / "s3dis_interp25x4"
+    SETTINGS_FILE = ROOT / "pcseg_settings.json"
+    return ROOT
+
+
 def ensure_dirs():
+    refresh_paths()
     for d in (ROOT, DATA, EXP, RESULTS, BANKS, UPSAMPLER, FIGURES):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def safe_shm_workers(requested=4):
+    """Caps DataLoader workers based on /dev/shm capacity to prevent Bus errors on Kaggle/containers."""
+    import shutil
+    try:
+        shm_stat = shutil.disk_usage("/dev/shm")
+        shm_total_mb = shm_stat.total / (1024 * 1024)
+        if shm_total_mb < 256:
+            return 0
+        elif shm_total_mb < 2048:
+            return min(requested, 2)
+    except Exception:
+        pass
+    if os.environ.get("KAGGLE_KERNEL_RUN_TYPE") or Path("/kaggle").is_dir():
+        return min(requested, 2)
+    return requested
 
 
 @dataclass
@@ -57,11 +90,13 @@ class Knobs:
 def load_knobs(path=None) -> Knobs:
     """Knobs from pcseg_settings.json (defaults if the file does not exist yet)."""
     path = Path(path or SETTINGS_FILE)
-    k = Knobs(num_worker=max(2, min(8, (os.cpu_count() or 4) // 2)))
+    default_workers = safe_shm_workers(max(2, min(8, (os.cpu_count() or 4) // 2)))
+    k = Knobs(num_worker=default_workers)
     if path.exists():
         for key, val in json.loads(path.read_text()).items():
             if hasattr(k, key):
                 setattr(k, key, val)
+    k.num_worker = safe_shm_workers(k.num_worker)
     return k
 
 

@@ -9,11 +9,13 @@ from pcseg.common import CLASS_NAMES
 def collect(results_dir=None):
     rows = []
     for f in sorted(Path(results_dir or settings.RESULTS).glob("*.json")):
-        r = json.load(open(f))
+        with open(f, "r", encoding="utf-8") as fp:
+            r = json.load(fp)
         if "mIoU" not in r:
             continue
+        pc_iou = r.get("per_class_iou", {})
         rows.append(dict(name=f.stem, mIoU=100 * r["mIoU"], OA=100 * r["OA"], mAcc=100 * r["mAcc"],
-                         **{c: (None if r["per_class_iou"].get(c) is None else 100 * r["per_class_iou"][c]) for c in CLASS_NAMES}))
+                         **{c: (None if pc_iou.get(c) is None else 100 * pc_iou[c]) for c in CLASS_NAMES}))
     return rows
 
 

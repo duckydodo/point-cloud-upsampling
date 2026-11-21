@@ -29,8 +29,12 @@ from kaggle.kaggle_utils import (
     KAGGLE_WORKING,
     SCRATCH_ROOT,
     TimeGuard,
+    checkpoint_mirror,
     copy_directory,
     find_input_dataset,
+    locate_stage1_artifacts,
+    locate_stage2_artifacts,
+    log_disk_usage,
     materialize_sparse25,
     prepare_s3dis_from_kaggle_input,
     setup_kaggle_env,
@@ -40,80 +44,14 @@ from pcseg import env_setup, experiments, results, run, settings
 from pcseg.common import CLASS_NAMES
 
 
-def locate_previous_stages(stage1_input=None, stage2_input=None):
-    """Finds Stage 1 upsamplers and Stage 2 baseline evaluations and checkpoints."""
-    # Find Stage 1
-    cand1 = None
-    if stage1_input and Path(stage1_input).exists():
-        cand1 = Path(stage1_input)
-    else:
-        found1 = find_input_dataset(["stage1", "upsampler", "stage-1"])
-        if found1:
-            cand1 = found1
-
-    if cand1:
-        print(f"Found Stage 1 inputs at: {cand1}")
-        src_ups = cand1 / "upsampler" if (cand1 / "upsampler").exists() else cand1
-        if src_ups.exists():
-            for m in src_ups.glob("*"):
-                if m.is_dir():
-                    dst_m = settings.UPSAMPLER / m.name
-                    dst_m.mkdir(parents=True, exist_ok=True)
-                    for f in ["best.pt", "last.pt", "log.json"]:
-                        if (m / f).exists():
-                            shutil.copy2(m / f, dst_m / f)
-
-    # Find Stage 2
-    cand2 = None
-    if stage2_input and Path(stage2_input).exists():
-        cand2 = Path(stage2_input)
-    else:
-        found2 = find_input_dataset(["stage2", "baselines", "stage-2"])
-        if found2:
-            cand2 = found2
-
-    if cand2:
-        print(f"Found Stage 2 inputs at: {cand2}")
-        # Copy results JSONs
-        src_res = cand2 / "results" if (cand2 / "results").exists() else cand2
-        settings.RESULTS.mkdir(parents=True, exist_ok=True)
-        for f in src_res.glob("*.json"):
-            shutil.copy2(f, settings.RESULTS / f.name)
-            print(f"Imported baseline metric: {f.name}")
-
-        # Copy exp checkpoints if available
-        src_exp = cand2 / "exp"
-        if src_exp.exists():
-            for exp_dir in src_exp.glob("*"):
-                if exp_dir.is_dir():
-                    dst_exp = settings.EXP / exp_dir.name
-                    dst_exp.mkdir(parents=True, exist_ok=True)
-                    for sub in ["model", "config.py", "train_done.json"]:
-                        s = exp_dir / sub
-                        if s.exists():
-                            if s.is_dir():
-                                shutil.copytree(s, dst_exp / sub, dirs_exist_ok=True)
-                            else:
-                                shutil.copy2(s, dst_exp / sub)
-
-    return cand1, cand2
-
-
-def prepare_stage3_datasets(smoke_test=False, custom_data_root=None, stage1_dir=None):
+def prepare_stage3_datasets(smoke_test=False, custom_data_root=None, split_indices_path=None):
     """Ensures S3DIS dense and sparse25 datasets are available, reusing Stage 1 split indices if present."""
     dense_path = prepare_s3dis_from_kaggle_input(smoke_test=smoke_test, custom_data_root=custom_data_root)
-
-    indices_file = None
-    if stage1_dir:
-        cand_indices = Path(stage1_dir) / "split_indices_sparse25.npz"
-        if cand_indices.exists():
-            indices_file = cand_indices
-            print(f"Reusing Stage 1 sparse split indices from: {indices_file}")
 
     materialize_sparse25(
         dense_root=dense_path,
         sparse_root=settings.SP25,
-        indices_file=indices_file,
+        indices_file=split_indices_path,
         smoke_test=smoke_test,
     )
 
@@ -232,7 +170,8 @@ def export_final_tables(output_dir=None):
         "\\midrule",
     ]
     for r in rows:
-        latex_content.append(f"{r['name'].replace('_', '\\_')} & {r['mIoU']:.2f} & {r['OA']:.2f} & {r['mAcc']:.2f} \\\\")
+        name_escaped = r["name"].replace("_", r"\_")
+        latex_content.append(f"{name_escaped} & {r['mIoU']:.2f} & {r['OA']:.2f} & {r['mAcc']:.2f} \\\\")
     latex_content.extend([
         "\\bottomrule",
         "\\end{tabular}",
@@ -248,6 +187,7 @@ def export_final_tables(output_dir=None):
         shutil.copy2(f, dst_json / f.name)
 
     print(f"Stage 3 Table Export Complete in {out_dir}")
+    log_disk_usage(out_dir)
 
 
 def main():
@@ -267,8 +207,9 @@ def main():
     setup_kaggle_env(install_spconv=True, setup_pointcept=True)
 
     # 2. Setup knobs and inputs
-    cand1, cand2 = locate_previous_stages(stage1_input=args.stage1_input, stage2_input=args.stage2_input)
-    prepare_stage3_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root, stage1_dir=cand1)
+    stage1_dir, split_indices_path = locate_stage1_artifacts(stage1_input_dir=args.stage1_input, smoke_test=args.smoke_test)
+    stage2_dir = locate_stage2_artifacts(stage2_input_dir=args.stage2_input, smoke_test=args.smoke_test)
+    prepare_stage3_datasets(smoke_test=args.smoke_test, custom_data_root=args.data_root, split_indices_path=split_indices_path)
 
     knobs = settings.load_knobs()
     if args.smoke_test:

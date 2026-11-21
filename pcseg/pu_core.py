@@ -141,8 +141,16 @@ def count_params(m):
     return sum(p.numel() for p in m.parameters())
 
 
+def safe_torch_load(path, map_location=None, weights_only=False):
+    """Version-safe torch.load that defaults to weights_only=False to prevent unpickling crashes on PyTorch 2.6+."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=weights_only)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def load_upsampler(path, device="cuda"):
-    ck = torch.load(path, map_location=device, weights_only=True)
+    ck = safe_torch_load(path, map_location=device, weights_only=False)
     m = PUNet(up_ratio=ck["up_ratio"], k=ck["k"], width=ck["width"]).to(device)
     m.load_state_dict(ck["state"])
     return m.eval()

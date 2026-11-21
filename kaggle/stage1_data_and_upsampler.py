@@ -30,6 +30,7 @@ from kaggle.kaggle_utils import (
     TimeGuard,
     copy_directory,
     find_input_dataset,
+    log_disk_usage,
     materialize_sparse25,
     prepare_s3dis_from_kaggle_input,
     setup_kaggle_env,
@@ -198,6 +199,7 @@ def export_stage1_artifacts(output_dir=None):
 
     total_bytes = sum(f.stat().st_size for f in out_base.rglob("*") if f.is_file())
     print(f"Stage 1 Artifact Export Complete! Total size: {total_bytes / (1024 ** 2):.2f} MB")
+    log_disk_usage(out_base)
 
 
 def main():
